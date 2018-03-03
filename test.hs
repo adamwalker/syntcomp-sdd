@@ -16,9 +16,13 @@ import Data.Attoparsec.Text
 import Safe
 import Options.Applicative as O
 
-import SDD.SDD
+import SDD.SDD hiding (deref)
+import qualified SDD.SDD as SDD (deref)
 import SDD.C
 import AAG
+
+deref = SDD.deref
+--deref x y = return ()
 
 mapAccumLM :: Monad m => (acc -> x -> m (acc, y)) -> acc -> [x] -> m (acc, [y])
 mapAccumLM _ s []     = return (s, [])
@@ -64,9 +68,10 @@ computeCube m nodes = do
     btrue <- managerTrue m
     foldM func btrue nodes 
     where
-    func x y = do
-        res <- conjoin x y m
+    func accum x = do
+        res <- conjoin accum x m
         ref res m
+        --deref accum m
         return res
 
 data SynthState = SynthState {
@@ -138,9 +143,14 @@ xnor m x y = do
 
     b <- conjoin notX notY m
     ref b m
+    --deref notX m
+    --deref notY m
 
     res <- disjoin a b m
     ref res m
+    --deref a m
+    --deref b m
+
     return res
 
 --Substation array for renaming current state vars to next state
@@ -207,8 +217,10 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
     --compile the transition relation
     let func (updateIdx, nextNode) = xnor m nextNode $ fromJustNote "trel lookup" (Map.lookup updateIdx stab)
 
+    putStrLn "Computing xnors"
     trel' <- mapM func updateFunctions
 
+    putStrLn "Computing trel"
     trel  <- computeCube m trel'
 
     let nextStateInds = flip map allVars $ flip elem (map snd latchSddInds)
@@ -295,7 +307,7 @@ doIt filename = runExceptT $ do
         let (cInputs, uInputs) = categorizeInputs symbols inputs
             Header{..}         = header
 
-        m <- managerCreate (fromIntegral (i + 2*l + 1)) 1
+        m <- managerCreate (fromIntegral (i + 2*l + 1)) 0
 
         ss@SynthState{..} <- compile m cInputs uInputs latches andGates (head outputs)
         res <- solveSafety m ss initState safeRegion
