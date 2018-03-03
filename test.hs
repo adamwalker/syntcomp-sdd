@@ -49,15 +49,25 @@ doAndGates m andGateInputs accum andGate =
                 (x, y)   =  fromJustNote "doAndGates" $ Map.lookup varIdx andGateInputs
             (accum', x)  <- doAndGates m andGateInputs accum x
             (accum'', y) <- doAndGates m andGateInputs accum' y
+
             res          <- conjoin x y m
+            ref res m
+
             n            <- neg res m
+            ref n m
+
             let finalMap =  Map.insert varIdx res (Map.insert (varIdx + 1) n accum'')
             return (finalMap, fromJustNote "doAndGates2" $ Map.lookup andGate finalMap) 
 
 computeCube :: SDDManager -> [SDDNode] -> IO SDDNode
 computeCube m nodes = do
     btrue <- managerTrue m
-    foldM (\x y -> conjoin x y m) btrue nodes 
+    foldM func btrue nodes 
+    where
+    func x y = do
+        res <- conjoin x y m
+        ref res m
+        return res
 
 data SynthState = SynthState {
     --Variable regions that get quantified out
@@ -84,7 +94,11 @@ doLabelVar :: SDDManager -> Int -> StateT Int IO [(Int, SDDNode)]
 doLabelVar m idx = do
     nextIdx <- reserveSDDVar
     sddNode <- liftIO $ managerLiteral (fromIntegral nextIdx) m
+    liftIO $ ref sddNode m
+
     negated <- liftIO $ neg sddNode m
+    liftIO $ ref negated m
+
     return $ [(idx, sddNode), (idx + 1, negated)]
 
 doLatchVar :: SDDManager -> (Int, Int) -> StateT Int IO ((Int, Int), [(Int, SDDNode)], SDDNode, (Int, SDDNode))
@@ -95,10 +109,14 @@ doLatchVar m (idx, updateFunc) = do
 
     --Create the SDD nodes for the indices
     sddNode     <- liftIO $ managerLiteral (fromIntegral currentIdx) m
+    liftIO $ ref sddNode m
+
     sddNodeNext <- liftIO $ managerLiteral (fromIntegral nextIdx)    m
+    liftIO $ ref sddNodeNext m
 
     --For the symbol table
     negated <- liftIO $ neg sddNode m
+    liftIO $ ref negated m
     let stab = [(idx, sddNode), (idx + 1, negated)]
 
     --The update function
@@ -110,12 +128,20 @@ xnor :: SDDManager -> SDDNode -> SDDNode -> IO SDDNode
 xnor m x y = do
 
     notX <- neg x m
+    ref notX m
+
     notY <- neg y m
+    ref notY m
 
     a <- conjoin x y m
-    b <- conjoin notX notY m
+    ref a m
 
-    disjoin a b m
+    b <- conjoin notX notY m
+    ref b m
+
+    res <- disjoin a b m
+    ref res m
+    return res
 
 --Substation array for renaming current state vars to next state
 --TODO: no first index
@@ -194,6 +220,7 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
     --get the safety condition
     let bad   = fromJustNote "compile" $ Map.lookup safeIndex stab
     safe <- neg bad m
+    ref safe m
     
     --construct the initial state
     initState <- computeCube m negLatchVars
@@ -203,22 +230,33 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
 forallMultiple :: [Bool] -> SDDNode -> SDDManager -> IO SDDNode
 forallMultiple vars node m = do
     nn    <- neg node m
+    ref nn m
+
     quant <- existsMultiple vars nn m
-    neg quant m
+    ref quant m
+
+    res <- neg quant m
+    ref res m
+    return res
 
 safeCpre :: SDDManager -> SynthState -> SDDNode -> IO SDDNode
 safeCpre m SynthState{..} winning = do
     print "*"
 
     nextWin <- renameVariables winning renameMap m
+    ref nextWin m
 
     conj <- conjoin trel nextWin m
+    ref conj m
 
     scu' <- existsMultiple nextStateInds conj m 
+    ref scu' m
 
     scu'AndSafe <- conjoin scu' safeRegion m
+    ref scu'AndSafe m
 
     sc <- existsMultiple cInputInds scu'AndSafe m
+    ref sc m
 
     s <- forallMultiple uInputInds sc m
 
@@ -234,7 +272,10 @@ fixedPoint m start func = do
 implies :: SDDNode -> SDDNode -> SDDManager -> IO SDDNode
 implies x y m = do
     nx <- neg x m
-    disjoin nx y m
+    ref nx m
+    res <- disjoin nx y m
+    ref res m
+    return res
 
 solveSafety :: SDDManager -> SynthState -> SDDNode -> SDDNode -> IO Bool
 solveSafety m ss init safeRegion = do
@@ -254,7 +295,7 @@ doIt filename = runExceptT $ do
         let (cInputs, uInputs) = categorizeInputs symbols inputs
             Header{..}         = header
 
-        m <- managerCreate (fromIntegral (i + 2*l + 1)) 0
+        m <- managerCreate (fromIntegral (i + 2*l + 1)) 1
 
         ss@SynthState{..} <- compile m cInputs uInputs latches andGates (head outputs)
         res <- solveSafety m ss initState safeRegion
