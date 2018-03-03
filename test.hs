@@ -17,6 +17,7 @@ import Safe
 import Options.Applicative as O
 
 import SDD.SDD
+import SDD.C
 import AAG
 
 mapAccumLM :: Monad m => (acc -> x -> m (acc, y)) -> acc -> [x] -> m (acc, [y])
@@ -59,11 +60,18 @@ computeCube m nodes = do
     foldM (\x y -> conjoin x y m) btrue nodes 
 
 data SynthState = SynthState {
-    cInputInds :: [Bool],
-    uInputInds :: [Bool],
+    --Variable regions that get quantified out
+    cInputInds    :: [Bool], --True iff its a controllable or uncontrollable input
+    uInputInds    :: [Bool],
 
-    safeRegion :: SDDNode,
-    initState  :: SDDNode
+    --SDDNodes
+    safeRegion    :: SDDNode,
+    initState     :: SDDNode,
+
+    --Transition relation
+    renameMap     :: [SDDLiteral],
+    trel          :: SDDNode,
+    nextStateInds :: [Bool]
 }
 
 reserveSDDVar :: MonadState Int m => m Int
@@ -79,14 +87,45 @@ doLabelVar m idx = do
     negated <- liftIO $ neg sddNode m
     return $ [(idx, sddNode), (idx + 1, negated)]
 
-doLatchVar :: SDDManager -> Int -> StateT Int IO ((Int, Int), [(Int, SDDNode)], SDDNode)
-doLatchVar m idx = do
+doLatchVar :: SDDManager -> (Int, Int) -> StateT Int IO ((Int, Int), [(Int, SDDNode)], SDDNode, (Int, SDDNode))
+doLatchVar m (idx, updateFunc) = do
+    --Reserve indices
     currentIdx <- reserveSDDVar
     nextIdx    <- reserveSDDVar
-    sddNode <- liftIO $ managerLiteral (fromIntegral currentIdx) m
+
+    --Create the SDD nodes for the indices
+    sddNode     <- liftIO $ managerLiteral (fromIntegral currentIdx) m
+    sddNodeNext <- liftIO $ managerLiteral (fromIntegral nextIdx)    m
+
+    --For the symbol table
     negated <- liftIO $ neg sddNode m
     let stab = [(idx, sddNode), (idx + 1, negated)]
-    return ((currentIdx, nextIdx), stab, negated)
+
+    --The update function
+    let update = (updateFunc, sddNodeNext)
+
+    return ((currentIdx, nextIdx), stab, negated, update)
+
+xnor :: SDDManager -> SDDNode -> SDDNode -> IO SDDNode
+xnor m x y = do
+
+    notX <- neg x m
+    notY <- neg y m
+
+    a <- conjoin x y m
+    b <- conjoin notX notY m
+
+    disjoin a b m
+
+--Substation array for renaming current state vars to next state
+--TODO: no first index
+substitutionArray :: [Int] -> [(Int, Int)] -> [Int]
+substitutionArray allVars stateVars = map func allVars
+    where
+    func :: Int -> Int
+    func x
+        | Just (current, next) <- find (\y -> fst y == x) stateVars = next
+        | otherwise                                                 = x
 
 compile :: SDDManager -> [Int] -> [Int] -> [(Int, Int)] -> [(Int, Int, Int)] -> Int -> IO SynthState
 compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
@@ -98,7 +137,7 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
     btrue         <- managerTrue  m
 
     --Create the variables
-    (cInputVars, endCInputVars, uInputVars, endUInputVars, latchVars, negLatchVars, endLatchVars, latchSddInds :: [(Int, Int)]) 
+    (cInputVars, endCInputVars, uInputVars, endUInputVars, latchVars, negLatchVars, endLatchVars, latchSddInds :: [(Int, Int)], updateFunctions) 
         <- flip evalStateT 1 $ do
 
             cInputVars    <- mapM (doLabelVar m) controllableInputs
@@ -107,18 +146,21 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
             uInputVars    <- mapM (doLabelVar m) uncontrollableInputs
             endUInputVars <- get
 
-            (latchSddInds, latchVars, negLatchVars) <- unzip3 <$> mapM (doLatchVar m . fst) latches
+            (latchSddInds, latchVars, negLatchVars, updateFunctions) <- unzip4 <$> mapM (doLatchVar m) latches
             endLatchVars  <- get
 
-            return (concat cInputVars, endCInputVars, concat uInputVars, endUInputVars, concat latchVars, negLatchVars, endLatchVars, latchSddInds)
+            return (concat cInputVars, endCInputVars, concat uInputVars, endUInputVars, concat latchVars, negLatchVars, endLatchVars, latchSddInds, updateFunctions)
 
     --compute the arrays for quantification
     let allVars    = [0 .. endLatchVars - 1]
+        --cInputInds = flip map allVars $ flip elem (map fst cInputVars)
+        --uInputInds = flip map allVars $ flip elem (map fst uInputVars)
         cInputInds = flip map allVars (< endCInputVars)
-        uInputInds = flip map allVars (\x -> x >= endCInputVars && x < endUInputVars)
+        uInputInds = flip map allVars $ \x -> x >= endCInputVars && x < endUInputVars
 
     putStrLn $ "cInputVars: " ++ show cInputInds
     putStrLn $ "uInputVars: " ++ show uInputInds
+    putStrLn $ "latchVars: "  ++ show latchSddInds
 
     putStrLn $ "endLatchVars: " ++ show endLatchVars
 
@@ -136,6 +178,19 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
 
     print stab
 
+    --compile the transition relation
+    let func (updateIdx, nextNode) = xnor m nextNode $ fromJustNote "trel lookup" (Map.lookup updateIdx stab)
+
+    trel' <- mapM func updateFunctions
+
+    trel  <- computeCube m trel'
+
+    let nextStateInds = flip map allVars $ flip elem (map snd latchSddInds)
+        renameMap     = map fromIntegral $ substitutionArray allVars latchSddInds
+
+    print $ "nextStateInds: " ++ show nextStateInds
+    print $ "renameMap: "     ++ show renameMap
+
     --get the safety condition
     let bad   = fromJustNote "compile" $ Map.lookup safeIndex stab
     safe <- neg bad m
@@ -143,7 +198,7 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
     --construct the initial state
     initState <- computeCube m negLatchVars
 
-    return $ SynthState cInputInds uInputInds safe initState
+    return $ SynthState cInputInds uInputInds safe initState renameMap trel nextStateInds
 
 forallMultiple :: [Bool] -> SDDNode -> SDDManager -> IO SDDNode
 forallMultiple vars node m = do
@@ -152,10 +207,14 @@ forallMultiple vars node m = do
     neg quant m
 
 safeCpre :: SDDManager -> SynthState -> SDDNode -> IO SDDNode
-safeCpre m SynthState{..} s = do
+safeCpre m SynthState{..} winning = do
     print "*"
 
-    scu' <- managerTrue m --vectorCompose s trel
+    nextWin <- renameVariables winning renameMap m
+
+    conj <- conjoin trel nextWin m
+
+    scu' <- existsMultiple nextStateInds conj m 
 
     scu'AndSafe <- conjoin scu' safeRegion m
 
