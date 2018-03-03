@@ -71,7 +71,7 @@ computeCube m nodes = do
     func accum x = do
         res <- conjoin accum x m
         ref res m
-        --deref accum m
+        deref accum m
         return res
 
 data SynthState = SynthState {
@@ -99,10 +99,10 @@ doLabelVar :: SDDManager -> Int -> StateT Int IO [(Int, SDDNode)]
 doLabelVar m idx = do
     nextIdx <- reserveSDDVar
     sddNode <- liftIO $ managerLiteral (fromIntegral nextIdx) m
-    liftIO $ ref sddNode m
+    --liftIO $ ref sddNode m
 
     negated <- liftIO $ neg sddNode m
-    liftIO $ ref negated m
+    --liftIO $ ref negated m
 
     return $ [(idx, sddNode), (idx + 1, negated)]
 
@@ -114,14 +114,14 @@ doLatchVar m (idx, updateFunc) = do
 
     --Create the SDD nodes for the indices
     sddNode     <- liftIO $ managerLiteral (fromIntegral currentIdx) m
-    liftIO $ ref sddNode m
+    --liftIO $ ref sddNode m
 
     sddNodeNext <- liftIO $ managerLiteral (fromIntegral nextIdx)    m
-    liftIO $ ref sddNodeNext m
+    --liftIO $ ref sddNodeNext m
 
     --For the symbol table
     negated <- liftIO $ neg sddNode m
-    liftIO $ ref negated m
+    --liftIO $ ref negated m
     let stab = [(idx, sddNode), (idx + 1, negated)]
 
     --The update function
@@ -143,13 +143,13 @@ xnor m x y = do
 
     b <- conjoin notX notY m
     ref b m
-    --deref notX m
-    --deref notY m
+    deref notX m
+    deref notY m
 
     res <- disjoin a b m
     ref res m
-    --deref a m
-    --deref b m
+    deref a m
+    deref b m
 
     return res
 
@@ -246,37 +246,60 @@ forallMultiple vars node m = do
 
     quant <- existsMultiple vars nn m
     ref quant m
+    deref nn m
 
     res <- neg quant m
     ref res m
+    deref quant m
     return res
 
 safeCpre :: SDDManager -> SynthState -> SDDNode -> IO SDDNode
 safeCpre m SynthState{..} winning = do
     print "*"
 
+    --putStrLn "rename"
     nextWin <- renameVariables winning renameMap m
     ref nextWin m
 
+    --putStrLn "conjoin"
     conj <- conjoin trel nextWin m
     ref conj m
+    deref nextWin m
 
+    --putStrLn "exists next"
     scu' <- existsMultiple nextStateInds conj m 
     ref scu' m
+    deref conj m
 
+    --putStrLn "conjoin safe"
     scu'AndSafe <- conjoin scu' safeRegion m
     ref scu'AndSafe m
+    deref scu' m
 
+    --putStrLn "exists input"
     sc <- existsMultiple cInputInds scu'AndSafe m
     ref sc m
+    deref scu'AndSafe m
 
+    --putStrLn "forall uncontrollable"
     s <- forallMultiple uInputInds sc m
+    deref sc m
 
+    --putStrLn "done"
     return s
 
 fixedPoint :: SDDManager -> SDDNode -> (SDDNode -> IO SDDNode) -> IO SDDNode
 fixedPoint m start func = do
+
+    --putStrLn "collecting garbage"
+    --garbageCollect m
+    --putStrLn "reordering"
+    --minimize m
+    --putStrLn "done"
+
     res <- func start
+    deref start m
+
     case res == start of
         True  -> return res
         False -> fixedPoint m res func 
@@ -307,7 +330,7 @@ doIt filename = runExceptT $ do
         let (cInputs, uInputs) = categorizeInputs symbols inputs
             Header{..}         = header
 
-        m <- managerCreate (fromIntegral (i + 2*l + 1)) 0
+        m <- managerCreate (fromIntegral (i + 2*l + 1)) 1
 
         ss@SynthState{..} <- compile m cInputs uInputs latches andGates (head outputs)
         res <- solveSafety m ss initState safeRegion
