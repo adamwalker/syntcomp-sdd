@@ -85,8 +85,7 @@ data SynthState = SynthState {
 
     --Transition relation
     renameMap     :: [SDDLiteral],
-    trel          :: SDDNode,
-    nextStateInds :: [Bool]
+    updateMap     :: [(Int, SDDNode)]
 }
 
 reserveSDDVar :: MonadState Int m => m Int
@@ -106,7 +105,7 @@ doLabelVar m idx = do
 
     return $ [(idx, sddNode), (idx + 1, negated)]
 
-doLatchVar :: SDDManager -> (Int, Int) -> StateT Int IO ((Int, Int), [(Int, SDDNode)], SDDNode, (Int, SDDNode))
+doLatchVar :: SDDManager -> (Int, Int) -> StateT Int IO ((Int, Int), [(Int, SDDNode)], SDDNode, (Int, Int, SDDNode))
 doLatchVar m (idx, updateFunc) = do
     --Reserve indices
     currentIdx <- reserveSDDVar
@@ -125,7 +124,7 @@ doLatchVar m (idx, updateFunc) = do
     let stab = [(idx, sddNode), (idx + 1, negated)]
 
     --The update function
-    let update = (updateFunc, sddNodeNext)
+    let update = (updateFunc, nextIdx, sddNodeNext)
 
     return ((currentIdx, nextIdx), stab, negated, update)
 
@@ -215,19 +214,16 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
     print stab
 
     --compile the transition relation
-    let func (updateIdx, nextNode) = xnor m nextNode $ fromJustNote "trel lookup" (Map.lookup updateIdx stab)
+    let func (updateIdx, nextIdx, nextNode) = do
+            trel <- xnor m nextNode $ fromJustNote "trel lookup" (Map.lookup updateIdx stab)
+            return (nextIdx, trel)
 
     putStrLn "Computing xnors"
-    trel' <- mapM func updateFunctions
+    updateMap <- mapM func updateFunctions
 
-    putStrLn "Computing trel"
-    trel  <- computeCube m trel'
+    let renameMap = map fromIntegral $ substitutionArray allVars latchSddInds
 
-    let nextStateInds = flip map allVars $ flip elem (map snd latchSddInds)
-        renameMap     = map fromIntegral $ substitutionArray allVars latchSddInds
-
-    print $ "nextStateInds: " ++ show nextStateInds
-    print $ "renameMap: "     ++ show renameMap
+    print $ "renameMap: " ++ show renameMap
 
     --get the safety condition
     let bad   = fromJustNote "compile" $ Map.lookup safeIndex stab
@@ -237,7 +233,7 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
     --construct the initial state
     initState <- computeCube m negLatchVars
 
-    return $ SynthState cInputInds uInputInds safe initState renameMap trel nextStateInds
+    return $ SynthState cInputInds uInputInds safe initState renameMap updateMap
 
 forallMultiple :: [Bool] -> SDDNode -> SDDManager -> IO SDDNode
 forallMultiple vars node m = do
@@ -253,6 +249,21 @@ forallMultiple vars node m = do
     deref quant m
     return res
 
+doTrel :: SDDManager -> [(Int, SDDNode)] -> SDDNode -> IO (SDDNode)
+doTrel m updateMap nextWin = foldM func nextWin updateMap
+    where
+    func :: SDDNode -> (Int, SDDNode) -> IO SDDNode
+    func accum (nextIdx, update) = do
+        conj <- conjoin accum update m
+        ref conj m
+        deref accum m
+
+        res <- exists (fromIntegral nextIdx) conj m
+        ref res m
+        deref conj m
+
+        return res
+
 safeCpre :: SDDManager -> SynthState -> SDDNode -> IO SDDNode
 safeCpre m SynthState{..} winning = do
     print "*"
@@ -261,15 +272,9 @@ safeCpre m SynthState{..} winning = do
     nextWin <- renameVariables winning renameMap m
     ref nextWin m
 
-    --putStrLn "conjoin"
-    conj <- conjoin trel nextWin m
-    ref conj m
-    deref nextWin m
-
     --putStrLn "exists next"
-    scu' <- existsMultiple nextStateInds conj m 
+    scu' <- doTrel m updateMap nextWin
     ref scu' m
-    deref conj m
 
     --putStrLn "conjoin safe"
     scu'AndSafe <- conjoin scu' safeRegion m
