@@ -272,7 +272,6 @@ safeCpre m SynthState{..} winning = do
 
     --putStrLn "exists next"
     scu' <- doTrel m updateMap nextWin
-    ref scu' m
 
     --putStrLn "conjoin safe"
     scu'AndSafe <- conjoin scu' safeRegion m
