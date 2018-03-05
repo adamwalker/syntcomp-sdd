@@ -193,11 +193,11 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
         cInputInds = flip map allVars (< endCInputVars)
         uInputInds = flip map allVars $ \x -> x >= endCInputVars && x < endUInputVars
 
-    putStrLn $ "cInputVars: " ++ show cInputInds
-    putStrLn $ "uInputVars: " ++ show uInputInds
-    putStrLn $ "latchVars: "  ++ show latchSddInds
+    --putStrLn $ "cInputVars: " ++ show cInputInds
+    --putStrLn $ "uInputVars: " ++ show uInputInds
+    --putStrLn $ "latchVars: "  ++ show latchSddInds
 
-    putStrLn $ "endLatchVars: " ++ show endLatchVars
+    --putStrLn $ "endLatchVars: " ++ show endLatchVars
 
     --create the symbol table
     let tf   = [(0, bfalse), (1, btrue)]
@@ -211,19 +211,17 @@ compile m controllableInputs uncontrollableInputs latches ands safeIndex = do
     --compile the and gates
     stab     <- fst <$> mapAccumLM (doAndGates m andMap) im andGates 
 
-    print stab
-
     --compile the transition relation
     let func (updateIdx, nextIdx, nextNode) = do
             trel <- xnor m nextNode $ fromJustNote "trel lookup" (Map.lookup updateIdx stab)
             return (nextIdx, trel)
 
-    putStrLn "Computing xnors"
+    --putStrLn "Computing xnors"
     updateMap <- mapM func updateFunctions
 
     let renameMap = map fromIntegral $ substitutionArray allVars latchSddInds
 
-    print $ "renameMap: " ++ show renameMap
+    --print $ "renameMap: " ++ show renameMap
 
     --get the safety condition
     let bad   = fromJustNote "compile" $ Map.lookup safeIndex stab
